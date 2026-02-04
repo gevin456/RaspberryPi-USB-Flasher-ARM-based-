@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """
-Simple USB formatter GUI for Raspberry Pi OS (Tkinter).
+Simple USB formatter GUI for Raspberry Pi OS (Tkinter | Trixie)
 - Lists block devices via lsblk
 - Detects available mkfs tools and presents filesystem options
 - Unmounts mounted partitions, runs mkfs with sudo
 Note: This tool performs destructive operations. Run with care and preferably as root (sudo).
 """
+
+# Release/version marker
+__version__ = "1.1"
+
+# Copyright
+# Copyright © 2026 Gevin
+# All rights reserved.
 
 import json
 import shutil
@@ -20,11 +27,7 @@ import hashlib
 import urllib.request
 import urllib.parse
 import html
-try:
-    from PIL import Image, ImageTk
-    PIL_AVAILABLE = True
-except Exception:
-    PIL_AVAILABLE = False
+# Pillow splash support removed — no splash screen in this build
 import platform
 
 LSBLK_CMD = ["lsblk", "-J", "-o", "NAME,KNAME,SIZE,MODEL,MOUNTPOINT,TYPE,RM"]
@@ -453,6 +456,9 @@ def write_iso_to_device(devnode, iso_path, log, progress_cb=None):
             log(f"Error writing ISO: {e}\n")
 
 
+ 
+
+
 def mount_first_partition(devnode, log):
     """Mount the first partition of the given device under /tmp and return mount point or None."""
     part = find_first_partition(devnode)
@@ -671,6 +677,17 @@ class App:
         frame = Frame(root)
         frame.pack(padx=8, pady=8)
 
+        # Menu bar with About
+        try:
+            menubar = Menu(root)
+            helpmenu = Menu(menubar, tearoff=0)
+            helpmenu.add_command(label="About", command=self.show_about)
+            menubar.add_cascade(label="Help", menu=helpmenu)
+            root.config(menu=menubar)
+        except Exception:
+            # If Menu isn't available for some reason, ignore
+            pass
+
         Label(frame, text="Devices:").grid(row=0, column=0, sticky='w')
         self.lb = Listbox(frame, width=80, height=6)
         self.lb.grid(row=1, column=0, columnspan=3)
@@ -736,6 +753,20 @@ class App:
         for d in devs:
             self.lb.insert(END, device_display(d))
         self.log_write("Refreshed device list.\n")
+
+    def show_about(self):
+            try:
+                ver = globals().get('__version__', 'unknown')
+                message = (
+                    f"USB Formatter\nVersion: {ver}\n\nCreated by Gevin.\nUse with care — this tool will erase selected devices.\n\n"
+                    "Copyright © 2026 Gevin"
+                )
+                messagebox.showinfo("About USB Formatter", message)
+            except Exception:
+                try:
+                    messagebox.showinfo("About", "USB Formatter — Created by Gevin\nCopyright © 2026 Gevin")
+                except Exception:
+                    pass
 
     def on_format(self):
         sel = self.lb.curselection()
@@ -812,28 +843,37 @@ class App:
         idx = sel[0]
         dev = self.devs[idx]
         devname = dev.get("name")
+        # Download options removed; user will select a local ISO file
 
-        iso_path = filedialog.askopenfilename(title="Select bootable ISO", filetypes=[("ISO files", "*.iso"), ("All files", "*")])
-        if not iso_path:
-            return
-        # Always compute SHA-256 of the ISO before writing (automated)
-        compute_hash = True
+        iso_path = None
 
-        def do_write():
-            msg = (
-                f"You are about to write ISO:\n{iso_path}\n\nto /dev/{devname}.\nThis will overwrite the entire device and make it bootable (if the ISO is hybrid).\n\nContinue?"
-            )
-            if not messagebox.askyesno("Confirm write ISO", msg):
-                return
+        def proceed_with_iso(chosen_iso):
+            """Compute hash (if enabled) and write ISO to device in background, handling UI state."""
+            compute_hash_local = True
 
-            # disable UI and reset progress
-            self.format_btn.config(state='disabled')
-            self.iso_btn.config(state='disabled')
-            self.set_progress(0)
-
-            def worker_iso():
+            def worker_all():
                 try:
-                    write_iso_to_device(devname, iso_path, self.log_write, progress_cb=self.set_progress)
+                    if compute_hash_local:
+                        digest = compute_iso_sha256(chosen_iso, self.log_write, progress_cb=self.set_progress)
+                        if digest:
+                            iso_name = os.path.basename(chosen_iso)
+                            online_digest = fetch_online_sha256(iso_name, self.log_write)
+                            if online_digest:
+                                if online_digest.strip().lower() != digest.strip().lower():
+                                    self.log_write("WARNING: Online checksum does not match computed checksum. Proceeding to write (force).\n")
+                                else:
+                                    self.log_write("Online checksum matches computed SHA-256.\n")
+                            else:
+                                chk_file, expected = find_checksum_file(chosen_iso)
+                                if chk_file and expected:
+                                    if expected.strip().lower() != digest.strip().lower():
+                                        self.log_write("WARNING: Local checksum file does not match computed checksum. Proceeding to write (force).\n")
+                                    else:
+                                        self.log_write("Local checksum matches computed SHA-256.\n")
+                                else:
+                                    self.log_write("No online checksum found; no local checksum found. Proceeding to write.\n")
+                    # proceed to write
+                    write_iso_to_device(devname, chosen_iso, self.log_write, progress_cb=self.set_progress)
                     # after writing, ask user if they want to mount to inspect files
                     def ask_mount():
                         try:
@@ -841,77 +881,39 @@ class App:
                         except Exception:
                             ok = False
                         if ok:
-                            # mount first partition if available, else device
                             parts = dev.get("children") or []
                             target = None
                             if parts:
                                 part_names = [p.get("name") for p in parts if p.get("type") == "part"]
                                 target = part_names[0] if part_names else None
                             if not target:
-                                # try to detect first partition
                                 target = find_first_partition(devname)
                             if target:
-                                # run mount in background
                                 def mount_thread():
                                     mount_first_partition(target, self.log_write)
                                 threading.Thread(target=mount_thread, daemon=True).start()
                             else:
-                                # try mounting whole device
                                 def mount_thread2():
                                     mount_first_partition(devname, self.log_write)
                                 threading.Thread(target=mount_thread2, daemon=True).start()
                     self.root.after(0, ask_mount)
                 finally:
-                    def finish():
+                    def finish_all():
                         self.set_progress(100)
                         self.format_btn.config(state='normal')
                         self.iso_btn.config(state='normal')
-                    self.root.after(0, finish)
+                    self.root.after(0, finish_all)
 
-            t = threading.Thread(target=worker_iso, daemon=True)
-            t.start()
-
-        if compute_hash:
-            # disable UI while hashing
+            # start background worker
             self.format_btn.config(state='disabled')
             self.iso_btn.config(state='disabled')
             self.set_progress(0)
-
-            def hash_worker():
-                try:
-                    digest = compute_iso_sha256(iso_path, self.log_write, progress_cb=self.set_progress)
-                    if digest:
-                        iso_name = os.path.basename(iso_path)
-                        # try online fetch of checksum
-                        online_digest = fetch_online_sha256(iso_name, self.log_write)
-                        if online_digest:
-                            if online_digest.strip().lower() != digest.strip().lower():
-                                self.log_write("WARNING: Online checksum does not match computed checksum. Proceeding to write (force).\n")
-                            else:
-                                self.log_write("Online checksum matches computed SHA-256.\n")
-                        else:
-                            # fallback to local checksum file detection
-                            chk_file, expected = find_checksum_file(iso_path)
-                            if chk_file and expected:
-                                if expected.strip().lower() != digest.strip().lower():
-                                    self.log_write("WARNING: Local checksum file does not match computed checksum. Proceeding to write (force).\n")
-                                else:
-                                    self.log_write("Local checksum matches computed SHA-256.\n")
-                            else:
-                                self.log_write("No online checksum found; no local checksum found. Proceeding to write.\n")
-                    # continue to write regardless (force)
-                    do_write()
-                finally:
-                    def finish_hash():
-                        self.set_progress(0)
-                        self.format_btn.config(state='normal')
-                        self.iso_btn.config(state='normal')
-                    self.root.after(0, finish_hash)
-
-            t = threading.Thread(target=hash_worker, daemon=True)
-            t.start()
-        else:
-            do_write()
+            threading.Thread(target=worker_all, daemon=True).start()
+        # Prompt user to select a local ISO file
+        iso_path = filedialog.askopenfilename(title="Select bootable ISO", filetypes=[("ISO files", "*.iso"), ("All files", "*")])
+        if not iso_path:
+            return
+        proceed_with_iso(iso_path)
 
 
 if __name__ == '__main__':
@@ -923,73 +925,12 @@ if __name__ == '__main__':
         sys.exit(1)
 
     # Now import tkinter widgets into globals (safe after dependencies are present)
-    from tkinter import Tk, Listbox, StringVar, OptionMenu, Button, Label, Entry, Text, END, Scrollbar, RIGHT, Y, BOTH, Frame, messagebox, filedialog, simpledialog
+    from tkinter import Tk, Listbox, StringVar, OptionMenu, Button, Label, Entry, Text, END, Scrollbar, RIGHT, Y, BOTH, Frame, messagebox, filedialog, simpledialog, Menu
     from tkinter import ttk
 
-    # Splash screen support: look for a splash image named 'splash.png' next to the script
-    SPLASH_DEFAULT = Path(__file__).with_name('splash.png')
-
-    def show_splash(image_path, timeout_ms=2000):
-        # small transient root to show splash
-        sroot = Tk()
-        sroot.overrideredirect(True)
-        try:
-            if PIL_AVAILABLE:
-                img = Image.open(image_path)
-                tkimg = ImageTk.PhotoImage(img)
-            else:
-                tkimg = None
-        except Exception:
-            tkimg = None
-
-        if tkimg:
-            lbl = Label(sroot, image=tkimg)
-            lbl.image = tkimg
-            lbl.pack()
-            sroot.update_idletasks()
-            # center
-            w = lbl.winfo_width()
-            h = lbl.winfo_height()
-            sw = sroot.winfo_screenwidth()
-            sh = sroot.winfo_screenheight()
-            x = int((sw - w) / 2)
-            y = int((sh - h) / 2)
-            sroot.geometry(f"{w}x{h}+{x}+{y}")
-        else:
-            lbl = Label(sroot, text="Starting...")
-            lbl.pack(padx=20, pady=20)
-
-        def close():
-            try:
-                sroot.destroy()
-            except Exception:
-                pass
-
-        sroot.after(timeout_ms, close)
-        # allow click to close
-        lbl.bind("<Button-1>", lambda e: close())
-        sroot.mainloop()
-
-    # If a splash image exists, show it; otherwise ask the user if they'd like to select one
-    splash_to_show = None
-    if SPLASH_DEFAULT.exists():
-        splash_to_show = str(SPLASH_DEFAULT)
-    else:
-        # create a tiny root to ask user whether to select an image
-        tmp_root = Tk()
-        tmp_root.withdraw()
-        if messagebox.askyesno("Splash image", "No default splash image found. Do you want to select an image to show at startup?"):
-            p = filedialog.askopenfilename(title="Select splash image (optional)", filetypes=[("Image files","*.png;*.jpg;*.jpeg;*.gif;*.bmp"), ("All files","*")])
-            if p:
-                splash_to_show = p
-        tmp_root.destroy()
-
-    if splash_to_show:
-        try:
-            show_splash(splash_to_show, timeout_ms=2000)
-        except Exception as e:
-            print("Could not show splash:", e)
+    # Splash support removed; start application directly
 
     root = Tk()
     app = App(root)
     root.mainloop()
+
