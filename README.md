@@ -1,4 +1,6 @@
 # RaspberryPi-USB-Flasher-ARM-based
+<img width="2400" height="1792" alt="raspi_usb_bootable" src="https://github.com/user-attachments/assets/5f8275db-a7f0-4cf4-ac57-e18a660160b7" />
+
 of course once in a while we need this also , to make bootable usb stick using raspberry pi 
 this started as a personal project as my main laptop got shutdown (while i was uisng linux-ubuntu) and cannot turned back on so i didnt had spare laptop or desktop so i had to rely on raspberry , but for some reason other apps (bootable makers) didnt worked out with me , so when i am back to original state first thing i did is making a python program for format | iso writer | make a bootable usb. 
 
